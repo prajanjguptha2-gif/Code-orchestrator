@@ -21,6 +21,11 @@ from typing import Optional
 app = Flask(__name__)
 CORS(app)
 
+# In-memory tracking of in-progress orchestration runs, keyed by orchestration
+# ID. Requires --workers 1 (see Procfile/render.yaml) since gunicorn worker
+# *processes* don't share memory — only threads within this one process do.
+active_orchestrations: dict = {}
+
 # ============================================================================
 # MODEL PROVIDERS
 #
