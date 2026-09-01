@@ -1034,7 +1034,7 @@ def serve_ui():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>🤖 Multi-Agent Code Orchestrator</title>
+        <title>♾️ Aeon</title>
         <style>
             * { margin: 0; padding: 0; box-sizing: border-box; }
             body {
@@ -1219,8 +1219,8 @@ def serve_ui():
     <body>
         <div class="container">
             <div class="header">
-                <h1>🤖 Multi-Agent Code Orchestrator</h1>
-                <p>Multi-provider (Groq/Gemini/Mistral/Cerebras/SambaNova/Cohere/OpenRouter) + Ollama fallback — Python · HTML · C</p>
+                <h1>♾️ Aeon</h1>
+                <p>Multi-agent code orchestrator — Groq/Gemini/Mistral/Cerebras/SambaNova/Cohere/OpenRouter + Ollama fallback — Python · HTML · C</p>
             </div>
             
             <div class="content">
