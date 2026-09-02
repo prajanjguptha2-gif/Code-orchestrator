@@ -312,6 +312,97 @@ def call_model(prompt: str, max_tokens: int = 1500) -> Optional[str]:
     return text
 
 # ============================================================================
+# TASK COMPLEXITY
+#
+# One quick, cheap classification call up front tags the task as simple /
+# medium / complex, so the rest of the pipeline can scale its effort to
+# match — a one-line script shouldn't get the same 4-6 step plan,
+# "handle ALL edge cases" coder guidelines, and nitpicking strict review as
+# a real application. This is the fix for simple tasks taking forever.
+# ============================================================================
+
+COMPLEXITY_CONFIG = {
+    "simple": {
+        "label": "Fast",
+        "safety_ceiling": 8,
+        "plan_instruction": "Give a lean plan of 1-2 short steps — this is a small, self-contained task, don't overthink it.",
+        "plan_max_tokens": 200,
+        "coder_guidelines": (
+            "- Write the simplest correct code that does the job\n"
+            "- Do NOT add extra features, config options, or abstractions that weren't asked for\n"
+            "- Comments only where genuinely useful, not on every line\n"
+            "- It's fine to skip edge cases that aren't implied by the task"
+        ),
+        "coder_max_tokens": 800,
+        "review_instruction": (
+            "This is a SIMPLE, small task. Judge it against what was actually asked, not against "
+            "production/enterprise standards. Do not fail it for missing things like extensive error "
+            "handling, logging, tests, or configurability unless the task specifically asked for them."
+        ),
+    },
+    "medium": {
+        "label": "Medium",
+        "safety_ceiling": 30,
+        "plan_instruction": "Give a plan of 3-4 steps — enough to be concrete without over-engineering.",
+        "plan_max_tokens": 500,
+        "coder_guidelines": (
+            "- Write clean, correct, reasonably robust code\n"
+            "- Handle the edge cases a user would realistically hit\n"
+            "- Comment non-obvious logic"
+        ),
+        "coder_max_tokens": 1800,
+        "review_instruction": (
+            "This is a MEDIUM-complexity task. Expect solid, working code with reasonable error "
+            "handling — not full production hardening."
+        ),
+    },
+    "complex": {
+        "label": "Thorough",
+        "safety_ceiling": 200,
+        "plan_instruction": "Provide a detailed plan (4-6 steps). Be specific and technical.",
+        "plan_max_tokens": 800,
+        "coder_guidelines": (
+            "- Write complete, production-ready code\n"
+            "- Add comprehensive comments\n"
+            "- Handle ALL edge cases\n"
+            "- Use best practices"
+        ),
+        "coder_max_tokens": 3000,
+        "review_instruction": (
+            "This is a COMPLEX task meant for production use. Hold it to a high bar: robustness, "
+            "edge cases, and best practices all matter here."
+        ),
+    },
+}
+
+def classify_complexity_agent(task: str, state: "OrchestratorState") -> str:
+    """One short, cheap call to tag the task's complexity. Falls back to
+    'medium' if every provider is unavailable, so classification failure
+    never blocks the run."""
+    state.add_message("info", "Classifying task complexity...")
+    prompt = f"""Classify the complexity of this coding task as exactly one word: simple, medium, or complex.
+
+- simple: a small script, one function, a single well-known algorithm, a trivial utility
+- medium: a multi-function program, basic app logic, moderate integration of a few pieces
+- complex: a multi-component system, something with real state/concurrency/architecture concerns, or an explicit request for production-grade robustness
+
+Task: {task}
+
+Respond with ONLY the single word: simple, medium, or complex."""
+
+    result, used = call_model_for_role("coordinator", prompt, max_tokens=10)
+    tier = "medium"
+    if result:
+        cleaned = result.strip().lower()
+        for candidate in ("simple", "medium", "complex"):
+            if candidate in cleaned:
+                tier = candidate
+                break
+    state.complexity = tier
+    state.add_message("info", f"Detected complexity: {COMPLEXITY_CONFIG[tier]['label']}" + (f" (via {used})" if used else ""))
+    return tier
+
+# ============================================================================
 # LANGUAGE CONFIG
 # ============================================================================
 
@@ -345,16 +436,21 @@ class OrchestratorState:
     def __init__(self):
         self.original_task = ""
         self.language = "python"
+        # "auto" lets classify_complexity_agent decide; otherwise the user
+        # forced a tier via the UI override and classification is skipped.
+        self.complexity_setting = "auto"
+        self.complexity = "medium"   # resolved tier, once known
         self.plan = ""
         self.current_code = ""
         self.files_modified = []
         self.test_results = []
         self.reviews = []
         self.iteration = 0
-        # No hard cap — the loop runs until the reviewer passes or every
-        # provider for the current step is exhausted (see run_orchestration_loop).
-        # This is kept only as a sane safety ceiling against runaway loops.
-        self.safety_ceiling = 200
+        # Scaled by complexity tier once known (see COMPLEXITY_CONFIG) — a
+        # simple task gets a much tighter ceiling so it can't spiral into a
+        # long refinement loop over nitpicks. Default here covers the brief
+        # window before classification runs.
+        self.safety_ceiling = 30
         self.quality_score = 0
         self.status = "initializing"
         self.messages = []
@@ -373,6 +469,9 @@ class OrchestratorState:
         return {
             "task": self.original_task,
             "language": self.language,
+            "complexity_setting": self.complexity_setting,
+            "complexity": self.complexity,
+            "complexity_label": COMPLEXITY_CONFIG.get(self.complexity, COMPLEXITY_CONFIG["medium"])["label"],
             "plan": self.plan,
             "code": self.current_code,
             "iteration": self.iteration,
@@ -395,16 +494,17 @@ def coordinator_agent(task: str, state: OrchestratorState) -> str:
     state.add_message("info", "Coordinator: analyzing task...")
 
     lang = get_language(state)
+    cfg = COMPLEXITY_CONFIG[state.complexity]
     prompt = f"""
 You are an expert coding coordinator. Break down this task into clear, actionable steps.
 
 Task: {task}
 Target language: {lang['prompt_name']}
 
-Provide a detailed plan (4-6 steps). Format as a numbered list. Be specific and technical.
+{cfg['plan_instruction']} Format as a numbered list. Be specific and technical.
 """
 
-    plan, used = call_model_for_role("coordinator", prompt, max_tokens=800)
+    plan, used = call_model_for_role("coordinator", prompt, max_tokens=cfg["plan_max_tokens"])
     if used:
         state.add_message("info", f"   (via {used})")
     if not plan:
@@ -423,8 +523,9 @@ def coder_agent(task: str, state: OrchestratorState) -> str:
     state.add_message("info", "Coder: writing code...")
 
     lang = get_language(state)
+    cfg = COMPLEXITY_CONFIG[state.complexity]
     prompt = f"""
-You are an expert code writer. Write complete, production-ready code for this task.
+You are an expert code writer. Write complete, working {lang['prompt_name']} code for this task.
 
 Task: {task}
 Target language: {lang['prompt_name']}
@@ -437,15 +538,12 @@ Plan to follow:
 {feedback}
 
 Guidelines:
-- Write complete, runnable {lang['prompt_name']} code
-- Add comprehensive comments
-- Handle ALL edge cases
-- Use best practices
+{cfg['coder_guidelines']}
 
 Output ONLY the code, no explanations, no markdown code fences.
 """
 
-    code, used = call_model_for_role("coder", prompt, max_tokens=3000)
+    code, used = call_model_for_role("coder", prompt, max_tokens=cfg["coder_max_tokens"])
     if used:
         state.add_message("info", f"   (via {used})")
     if not code:
@@ -651,13 +749,16 @@ def reviewer_agent(code: str, task: str, exec_results: dict, state: Orchestrator
     state.add_message("info", "Reviewer: assessing quality...")
 
     lang = get_language(state)
+    cfg = COMPLEXITY_CONFIG[state.complexity]
     prompt = f"""
-You are a strict code reviewer. Evaluate this code for production readiness.
+You are a code reviewer. Evaluate this code against what the task actually required.
+
+{cfg['review_instruction']}
 
 Task: {task}
 Target language: {lang['prompt_name']}
 
-Code quality: (assess correctness, robustness, best practices)
+Code quality: (assess correctness, robustness, best practices — calibrated to the complexity note above)
 Execution results: {json.dumps(exec_results, indent=2)}
 
 Respond in JSON format ONLY:
@@ -762,19 +863,30 @@ Every provider available for the current step is currently unavailable (rate-lim
 # ============================================================================
 
 def run_orchestration_loop(task: str, orchestration_id: str, language: str = "python",
-                            auto_resume: bool = True, resumed_state: "OrchestratorState" = None):
-    """Run the orchestration loop. No fixed iteration cap — keeps going
-    until the reviewer passes, or every provider for the current step is
-    exhausted (all rate-limited / unconfigured / failing), at which point
-    it writes an overview doc and either auto-resumes later or pauses for
-    approval, depending on state.auto_resume."""
+                            auto_resume: bool = True, resumed_state: "OrchestratorState" = None,
+                            complexity_setting: str = "auto"):
+    """Run the orchestration loop. No fixed iteration cap beyond the
+    complexity-scaled safety_ceiling — keeps going until the reviewer
+    passes, or every provider for the current step is exhausted (all
+    rate-limited / unconfigured / failing), at which point it writes an
+    overview doc and either auto-resumes later or pauses for approval,
+    depending on state.auto_resume."""
     state = resumed_state or OrchestratorState()
     if resumed_state is None:
         state.original_task = task
         state.language = language if language in LANGUAGES else "python"
         state.auto_resume = auto_resume
+        state.complexity_setting = complexity_setting if complexity_setting in ("auto", *COMPLEXITY_CONFIG) else "auto"
     state.status = "running"
     active_orchestrations[orchestration_id] = state
+
+    if state.complexity_setting != "auto":
+        state.complexity = state.complexity_setting
+    elif not state.plan:
+        # Only classify once, before the first plan is made — a resumed run
+        # that already has a plan keeps whatever tier it started with.
+        classify_complexity_agent(task, state)
+    state.safety_ceiling = COMPLEXITY_CONFIG[state.complexity]["safety_ceiling"]
 
     if not state.plan:
         coordinator_agent(task, state)
@@ -815,7 +927,7 @@ def run_orchestration_loop(task: str, orchestration_id: str, language: str = "py
         state.add_message("info", "Refining...")
 
     state.status = "safety_ceiling_reached"
-    state.add_message("warning", f"Safety ceiling reached ({state.safety_ceiling} iterations). Best: {state.quality_score}/100")
+    state.add_message("warning", f"Safety ceiling reached ({state.safety_ceiling} iterations for a '{state.complexity}' task). Best: {state.quality_score}/100")
     save_run_state(orchestration_id, state)
 
 # ============================================================================
@@ -892,12 +1004,16 @@ def orchestrate():
     data = request.json
     task = data.get("task", "").strip()
     language = data.get("language", "python").strip().lower()
+    complexity_setting = data.get("complexity", "auto").strip().lower()
 
     if not task:
         return jsonify({"error": "Task is required"}), 400
 
     if language not in LANGUAGES:
         return jsonify({"error": f"Unsupported language '{language}'. Choose from: {', '.join(LANGUAGES)}"}), 400
+
+    if complexity_setting not in ("auto", *COMPLEXITY_CONFIG):
+        return jsonify({"error": f"Unsupported complexity '{complexity_setting}'. Choose from: auto, {', '.join(COMPLEXITY_CONFIG)}"}), 400
 
     auto_resume = bool(data.get("auto_resume", True))  # per-run toggle
 
@@ -908,7 +1024,7 @@ def orchestrate():
     # Run in background thread
     thread = threading.Thread(
         target=run_orchestration_loop,
-        args=(task, orch_id, language, auto_resume)
+        args=(task, orch_id, language, auto_resume, None, complexity_setting)
     )
     thread.daemon = True
     thread.start()
@@ -941,7 +1057,7 @@ def resume(orch_id):
 
     thread = threading.Thread(
         target=run_orchestration_loop,
-        args=(state.original_task, orch_id, state.language, state.auto_resume, state)
+        args=(state.original_task, orch_id, state.language, state.auto_resume, state, state.complexity_setting)
     )
     thread.daemon = True
     thread.start()
@@ -964,6 +1080,8 @@ def _state_from_dict(d: dict) -> "OrchestratorState":
     state = OrchestratorState()
     state.original_task = d.get("task", "")
     state.language = d.get("language", "python")
+    state.complexity_setting = d.get("complexity_setting", "auto")
+    state.complexity = d.get("complexity", "medium")
     state.plan = d.get("plan", "")
     state.current_code = d.get("code", "")
     state.iteration = d.get("iteration", 0)
@@ -988,7 +1106,7 @@ def _auto_resume_watcher():
                     state.add_message("info", "Auto-resuming — provider quota should be available again.")
                     thread = threading.Thread(
                         target=run_orchestration_loop,
-                        args=(state.original_task, orch_id, state.language, state.auto_resume, state)
+                        args=(state.original_task, orch_id, state.language, state.auto_resume, state, state.complexity_setting)
                     )
                     thread.daemon = True
                     thread.start()
@@ -1325,6 +1443,13 @@ def serve_ui():
                         <option value="html">HTML / CSS / JS</option>
                         <option value="c">C</option>
                     </select>
+                    <label class="field-label" for="complexitySelect">Speed / complexity</label>
+                    <select id="complexitySelect">
+                        <option value="auto">Auto-detect</option>
+                        <option value="simple">Fast — simple task</option>
+                        <option value="medium">Medium</option>
+                        <option value="complex">Thorough — complex task</option>
+                    </select>
                     <label class="field-label" for="taskInput">What should Aeon build?</label>
                     <textarea id="taskInput" placeholder="Describe the code you want to create..."></textarea>
                     <label class="toggle-row">
@@ -1385,6 +1510,10 @@ def serve_ui():
                             <div class="stat-label">Iterations</div>
                         </div>
                         <div class="stat">
+                            <div class="stat-value" id="complexityBadge">—</div>
+                            <div class="stat-label">Complexity</div>
+                        </div>
+                        <div class="stat">
                             <div class="stat-value">Free</div>
                             <div class="stat-label">Cost</div>
                         </div>
@@ -1407,6 +1536,7 @@ def serve_ui():
             async function startOrchestration() {
                 const task = document.getElementById("taskInput").value.trim();
                 const language = document.getElementById("languageSelect").value;
+                const complexity = document.getElementById("complexitySelect").value;
                 if (!task) {
                     alert("Please enter a task");
                     return;
@@ -1428,6 +1558,7 @@ def serve_ui():
                 document.getElementById("codeOutput").value = "";
                 document.getElementById("qualityScore").textContent = "—";
                 document.getElementById("iterationCount").textContent = "—";
+                document.getElementById("complexityBadge").textContent = "—";
 
                 const auto_resume = document.getElementById("autoResumeToggle").checked;
                 document.getElementById("overviewDoc").style.display = "none";
@@ -1436,7 +1567,7 @@ def serve_ui():
                 const response = await fetch("/api/orchestrate", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ task, language, auto_resume })
+                    body: JSON.stringify({ task, language, complexity, auto_resume })
                 });
 
                 const data = await response.json();
@@ -1469,6 +1600,9 @@ def serve_ui():
                     }
                     if (state.iteration) {
                         document.getElementById("iterationCount").textContent = state.iteration;
+                    }
+                    if (state.complexity_label) {
+                        document.getElementById("complexityBadge").textContent = state.complexity_label;
                     }
 
                     if (state.code) {
@@ -1547,6 +1681,7 @@ def serve_ui():
                 document.getElementById("taskInput").value = "";
                 clearMessages();
                 document.getElementById("codeOutput").value = "";
+                document.getElementById("complexityBadge").textContent = "—";
                 document.getElementById("status").classList.remove("show");
                 document.getElementById("orchestrateBtn").disabled = false;
                 document.getElementById("resumeBtn").style.display = "none";
