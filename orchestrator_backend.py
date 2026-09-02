@@ -360,7 +360,7 @@ class OrchestratorState:
         self.messages = []
         self.auto_resume = True   # per-run toggle — set False to require manual approval
         self.overview_doc = ""    # populated when the run pauses
-    
+
     def add_message(self, level: str, text: str):
         """Add a timestamped message"""
         self.messages.append({
@@ -368,7 +368,7 @@ class OrchestratorState:
             "text": text,
             "iteration": self.iteration
         })
-    
+
     def to_dict(self):
         return {
             "task": self.original_task,
@@ -392,8 +392,8 @@ class OrchestratorState:
 # ============================================================================
 
 def coordinator_agent(task: str, state: OrchestratorState) -> str:
-    state.add_message("info", "📋 Coordinator: Analyzing task...")
-    
+    state.add_message("info", "Coordinator: analyzing task...")
+
     lang = get_language(state)
     prompt = f"""
 You are an expert coding coordinator. Break down this task into clear, actionable steps.
@@ -403,25 +403,25 @@ Target language: {lang['prompt_name']}
 
 Provide a detailed plan (4-6 steps). Format as a numbered list. Be specific and technical.
 """
-    
+
     plan, used = call_model_for_role("coordinator", prompt, max_tokens=800)
     if used:
         state.add_message("info", f"   (via {used})")
     if not plan:
         state.add_message("error", "Failed to generate plan")
         return ""
-    
+
     state.plan = plan
-    state.add_message("success", f"✓ Plan created")
+    state.add_message("success", "Plan created")
     return plan
 
 def coder_agent(task: str, state: OrchestratorState) -> str:
     feedback = ""
     if state.reviews:
         feedback = "\n\nFeedback to address:\n" + "\n".join(state.reviews[-3:])
-    
-    state.add_message("info", "💻 Coder: Writing code...")
-    
+
+    state.add_message("info", "Coder: writing code...")
+
     lang = get_language(state)
     prompt = f"""
 You are an expert code writer. Write complete, production-ready code for this task.
@@ -444,21 +444,21 @@ Guidelines:
 
 Output ONLY the code, no explanations, no markdown code fences.
 """
-    
+
     code, used = call_model_for_role("coder", prompt, max_tokens=3000)
     if used:
         state.add_message("info", f"   (via {used})")
     if not code:
         state.add_message("error", "Failed to generate code")
         return state.current_code or ""
-    
+
     state.current_code = code
-    state.add_message("success", f"✓ Code generated ({len(code)} chars)")
+    state.add_message("success", f"Code generated ({len(code)} chars)")
     return code
 
 def executor_agent(code: str, state: OrchestratorState, file_path: str = None) -> dict:
-    state.add_message("info", "⚙️  Executor: Running validation...")
-    
+    state.add_message("info", "Executor: running validation...")
+
     lang = get_language(state)
     ext = lang["extension"]
     if file_path is None:
@@ -473,7 +473,7 @@ def executor_agent(code: str, state: OrchestratorState, file_path: str = None) -
         "output": [],
         "errors": []
     }
-    
+
     try:
         with open(file_path, "w") as f:
             f.write(code)
@@ -482,7 +482,7 @@ def executor_agent(code: str, state: OrchestratorState, file_path: str = None) -
         results["errors"].append(f"File write failed: {e}")
         state.add_message("error", f"File write failed: {e}")
         return results
-    
+
     if ext == ".py":
         _validate_python(file_path, state, results)
     elif ext == ".c":
@@ -493,7 +493,7 @@ def executor_agent(code: str, state: OrchestratorState, file_path: str = None) -
         # Unknown language: just confirm the file was written.
         results["syntax_ok"] = True
         results["execution_ok"] = True
-        results["output"].append("✓ File written (no automated validator for this language)")
+        results["output"].append("File written (no automated validator for this language)")
         state.add_message("warning", "No validator for this language — skipping checks")
 
     return results
@@ -507,12 +507,12 @@ def _validate_python(file_path: str, state: OrchestratorState, results: dict):
         )
         if result.returncode == 0:
             results["syntax_ok"] = True
-            results["output"].append("✓ Syntax check passed")
-            state.add_message("success", "✓ Syntax valid")
+            results["output"].append("Syntax check passed")
+            state.add_message("success", "Syntax valid")
         else:
             results["errors"].append(f"Syntax error: {result.stderr}")
-            results["output"].append("✗ Syntax error")
-            state.add_message("error", "✗ Syntax error")
+            results["output"].append("Syntax error")
+            state.add_message("error", "Syntax error")
             return
     except Exception as e:
         results["errors"].append(f"Syntax check error: {e}")
@@ -525,19 +525,18 @@ def _validate_python(file_path: str, state: OrchestratorState, results: dict):
         )
         if result.returncode == 0:
             results["execution_ok"] = True
-            results["output"].append("✓ Execution successful")
-            state.add_message("success", "✓ Execution successful")
+            results["output"].append("Execution successful")
+            state.add_message("success", "Execution successful")
         else:
             results["errors"].append(f"Execution failed: {result.stderr[:200]}")
-            results["output"].append("✗ Execution failed")
-            state.add_message("error", "✗ Execution failed")
+            results["output"].append("Execution failed")
+            state.add_message("error", "Execution failed")
     except subprocess.TimeoutExpired:
         results["errors"].append("Execution timeout")
-        results["output"].append("✗ Timeout")
-        state.add_message("error", "✗ Timeout (>15s)")
+        results["output"].append("Timeout")
+        state.add_message("error", "Timeout (>15s)")
     except Exception as e:
         results["errors"].append(f"Execution error: {e}")
-
 
 def _validate_c(file_path: str, state: OrchestratorState, results: dict):
     binary_path = str(Path(file_path).with_suffix(".exe" if sys.platform == "win32" else ""))
@@ -548,8 +547,8 @@ def _validate_c(file_path: str, state: OrchestratorState, results: dict):
         )
     except FileNotFoundError:
         results["errors"].append("gcc not found — install a C compiler (e.g. MinGW on Windows) to validate C code")
-        results["output"].append("✗ No C compiler available")
-        state.add_message("error", "✗ gcc not found — can't compile C code")
+        results["output"].append("No C compiler available")
+        state.add_message("error", "gcc not found — can't compile C code")
         return
     except Exception as e:
         results["errors"].append(f"Compile check error: {e}")
@@ -557,12 +556,12 @@ def _validate_c(file_path: str, state: OrchestratorState, results: dict):
 
     if compile_result.returncode == 0:
         results["syntax_ok"] = True
-        results["output"].append("✓ Compiled successfully")
-        state.add_message("success", "✓ Compiles cleanly")
+        results["output"].append("Compiled successfully")
+        state.add_message("success", "Compiles cleanly")
     else:
         results["errors"].append(f"Compile error: {compile_result.stderr[:300]}")
-        results["output"].append("✗ Compile error")
-        state.add_message("error", "✗ Compile error")
+        results["output"].append("Compile error")
+        state.add_message("error", "Compile error")
         return
 
     try:
@@ -571,19 +570,18 @@ def _validate_c(file_path: str, state: OrchestratorState, results: dict):
         )
         if run_result.returncode == 0:
             results["execution_ok"] = True
-            results["output"].append("✓ Execution successful")
-            state.add_message("success", "✓ Execution successful")
+            results["output"].append("Execution successful")
+            state.add_message("success", "Execution successful")
         else:
             results["errors"].append(f"Execution failed (exit code {run_result.returncode}): {run_result.stderr[:200]}")
-            results["output"].append("✗ Execution failed")
-            state.add_message("error", "✗ Execution failed")
+            results["output"].append("Execution failed")
+            state.add_message("error", "Execution failed")
     except subprocess.TimeoutExpired:
         results["errors"].append("Execution timeout")
-        results["output"].append("✗ Timeout")
-        state.add_message("error", "✗ Timeout (>15s)")
+        results["output"].append("Timeout")
+        state.add_message("error", "Timeout (>15s)")
     except Exception as e:
         results["errors"].append(f"Execution error: {e}")
-
 
 def _validate_html(file_path: str, state: OrchestratorState, results: dict):
     """HTML doesn't 'execute' server-side, so validate structure instead:
@@ -622,13 +620,13 @@ def _validate_html(file_path: str, state: OrchestratorState, results: dict):
 
         if checker.stack:
             results["errors"].append(f"Unclosed tags: {', '.join(checker.stack)}")
-            results["output"].append("✗ Unclosed HTML tags")
-            state.add_message("error", f"✗ Unclosed tags: {', '.join(checker.stack)}")
+            results["output"].append("Unclosed HTML tags")
+            state.add_message("error", f"Unclosed tags: {', '.join(checker.stack)}")
             return
 
         results["syntax_ok"] = True
-        results["output"].append("✓ HTML structure valid")
-        state.add_message("success", "✓ HTML structure valid")
+        results["output"].append("HTML structure valid")
+        state.add_message("success", "HTML structure valid")
 
         # Basic brace balance check for embedded <script> JS
         import re
@@ -639,19 +637,19 @@ def _validate_html(file_path: str, state: OrchestratorState, results: dict):
                 js_ok = False
         if js_ok:
             results["execution_ok"] = True
-            results["output"].append("✓ Embedded script braces balanced")
-            state.add_message("success", "✓ Embedded JS looks structurally sound")
+            results["output"].append("Embedded script braces balanced")
+            state.add_message("success", "Embedded JS looks structurally sound")
         else:
             results["errors"].append("Unbalanced braces/parens in <script> content")
-            results["output"].append("✗ Script braces unbalanced")
-            state.add_message("error", "✗ Unbalanced braces in embedded script")
+            results["output"].append("Script braces unbalanced")
+            state.add_message("error", "Unbalanced braces in embedded script")
     except Exception as e:
         results["errors"].append(f"HTML validation error: {e}")
-        state.add_message("error", f"✗ Validation error: {e}")
+        state.add_message("error", f"Validation error: {e}")
 
 def reviewer_agent(code: str, task: str, exec_results: dict, state: OrchestratorState) -> dict:
-    state.add_message("info", "🔍 Reviewer: Assessing quality...")
-    
+    state.add_message("info", "Reviewer: assessing quality...")
+
     lang = get_language(state)
     prompt = f"""
 You are a strict code reviewer. Evaluate this code for production readiness.
@@ -674,14 +672,14 @@ Respond in JSON format ONLY:
 
 Output ONLY JSON.
 """
-    
+
     review_text, used = call_model_for_role("reviewer", prompt, max_tokens=800)
     if used:
         state.add_message("info", f"   (via {used})")
     if not review_text:
         state.add_message("error", "Review failed")
         return {"pass": False, "quality_score": 0}
-    
+
     try:
         review = json.loads(review_text)
     except Exception:
@@ -693,18 +691,18 @@ Output ONLY JSON.
                 review = json.loads(match.group(0))
             except Exception:
                 review = {"pass": False, "quality_score": 50, "summary": "Review parse error"}
-                state.add_message("warning", f"⚠️ Couldn't parse reviewer JSON: {review_text[:150]}")
+                state.add_message("warning", f"Couldn't parse reviewer JSON: {review_text[:150]}")
         else:
             review = {"pass": False, "quality_score": 50, "summary": "Review parse error"}
-            state.add_message("warning", f"⚠️ Couldn't parse reviewer JSON: {review_text[:150]}")
-    
+            state.add_message("warning", f"Couldn't parse reviewer JSON: {review_text[:150]}")
+
     state.quality_score = review.get("quality_score", 0)
-    
+
     if review.get("pass"):
-        state.add_message("success", f"✅ PASS - Quality: {review.get('quality_score', 0)}/100")
+        state.add_message("success", f"PASS — quality: {review.get('quality_score', 0)}/100")
     else:
-        state.add_message("warning", f"❌ NEEDS WORK - Quality: {review.get('quality_score', 0)}/100")
-    
+        state.add_message("warning", f"NEEDS WORK — quality: {review.get('quality_score', 0)}/100")
+
     return review
 
 
@@ -712,7 +710,7 @@ def documenter_agent(code: str, task: str, state: "OrchestratorState") -> str:
     """Runs once the reviewer passes — writes a short docs/summary blurb
     for the finished code. Non-critical: if every documenter provider is
     unavailable, we just skip it rather than blocking on it."""
-    state.add_message("info", "📝 Documenter: Writing summary...")
+    state.add_message("info", "Documenter: writing summary...")
     lang = get_language(state)
     prompt = f"""
 Write a short (5-8 sentence) plain-English summary of this {lang['prompt_name']} code for a README.
@@ -725,9 +723,9 @@ Code:
 """
     doc_text, used = call_model_for_role("documenter", prompt, max_tokens=500)
     if doc_text is None:
-        state.add_message("warning", "⚠️ Documenter unavailable — skipping (non-critical)")
+        state.add_message("warning", "Documenter unavailable — skipping (non-critical)")
         return ""
-    state.add_message("success", f"✓ Summary written (via {used})")
+    state.add_message("success", f"Summary written (via {used})")
     return doc_text.strip()
 
 
@@ -750,8 +748,7 @@ def generate_overview_doc(state: "OrchestratorState") -> str:
 {state.plan or '(no plan generated yet)'}
 
 ## Why it paused
-Every provider available for the current step is currently unavailable
-(rate-limited or unconfigured).
+Every provider available for the current step is currently unavailable (rate-limited or unconfigured).
 
 ## Providers currently resting
 {resting_lines}
@@ -785,7 +782,7 @@ def run_orchestration_loop(task: str, orchestration_id: str, language: str = "py
             state.status = "paused"
             state.overview_doc = generate_overview_doc(state)
             save_run_state(orchestration_id, state)
-            state.add_message("warning", "⏸ Paused — coordinator has no available provider right now.")
+            state.add_message("warning", "Paused — coordinator has no available provider right now.")
             return
 
     while state.iteration < state.safety_ceiling:
@@ -798,7 +795,7 @@ def run_orchestration_loop(task: str, orchestration_id: str, language: str = "py
             state.status = "paused"
             state.overview_doc = generate_overview_doc(state)
             save_run_state(orchestration_id, state)
-            state.add_message("warning", "⏸ Paused — no coder provider available right now.")
+            state.add_message("warning", "Paused — no coder provider available right now.")
             return
 
         state.current_code = code
@@ -807,7 +804,7 @@ def run_orchestration_loop(task: str, orchestration_id: str, language: str = "py
 
         if review.get("pass") and exec_results["syntax_ok"] and exec_results["execution_ok"]:
             state.status = "success"
-            state.add_message("success", "✅ SUCCESS! Code is production-ready.")
+            state.add_message("success", "SUCCESS — code is production-ready.")
             doc = documenter_agent(code, task, state)
             if doc:
                 state.overview_doc = doc
@@ -895,19 +892,19 @@ def orchestrate():
     data = request.json
     task = data.get("task", "").strip()
     language = data.get("language", "python").strip().lower()
-    
+
     if not task:
         return jsonify({"error": "Task is required"}), 400
-    
+
     if language not in LANGUAGES:
         return jsonify({"error": f"Unsupported language '{language}'. Choose from: {', '.join(LANGUAGES)}"}), 400
-    
+
     auto_resume = bool(data.get("auto_resume", True))  # per-run toggle
 
     # Generate unique ID
     import uuid
     orch_id = str(uuid.uuid4())[:8]
-    
+
     # Run in background thread
     thread = threading.Thread(
         target=run_orchestration_loop,
@@ -915,7 +912,7 @@ def orchestrate():
     )
     thread.daemon = True
     thread.start()
-    
+
     return jsonify({"id": orch_id, "status": "started"}), 202
 
 @app.route("/api/status/<orch_id>", methods=["GET"])
@@ -988,7 +985,7 @@ def _auto_resume_watcher():
             if state.status == "paused" and state.auto_resume:
                 still_resting = any(info["resting"] for info in provider_status().values())
                 if not still_resting:
-                    state.add_message("info", "▶ Auto-resuming — provider quota should be available again.")
+                    state.add_message("info", "Auto-resuming — provider quota should be available again.")
                     thread = threading.Thread(
                         target=run_orchestration_loop,
                         args=(state.original_task, orch_id, state.language, state.auto_resume, state)
@@ -1003,16 +1000,16 @@ def result(orch_id):
     """Get final result"""
     if orch_id not in active_orchestrations:
         return jsonify({"error": "Orchestration not found"}), 404
-    
+
     state = active_orchestrations[orch_id]
-    
+
     if state.status != "success":
         return jsonify({
             "status": state.status,
             "quality_score": state.quality_score,
             "code": state.current_code
         })
-    
+
     return jsonify({
         "status": "success",
         "quality_score": state.quality_score,
@@ -1027,256 +1024,369 @@ def index():
     return serve_ui()
 
 def serve_ui():
-    """Return the HTML UI"""
+    """Return the Aeon web UI: dark, warm-paper themed, amber/gold accent,
+    dusty sage for success, muted rust for errors, no emoji (line icons
+    instead), and no provider names surfaced anywhere."""
     html = """
     <!DOCTYPE html>
     <html lang="en">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>♾️ Aeon</title>
+        <title>Aeon</title>
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@500;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
         <style>
+            :root {
+                --bg: #211d1a;
+                --bg-soft: #262119;
+                --card: #2a241f;
+                --card-raised: #302a24;
+                --ink: #f2ead9;
+                --ink-dim: #c9beac;
+                --ink-faint: #8c8272;
+                --amber: #d9a441;
+                --amber-soft: rgba(217, 164, 65, 0.16);
+                --sage: #8fa88a;
+                --sage-soft: rgba(143, 168, 138, 0.14);
+                --rust: #b5573f;
+                --rust-soft: rgba(181, 87, 63, 0.14);
+                --hairline: rgba(242, 234, 217, 0.08);
+            }
+
             * { margin: 0; padding: 0; box-sizing: border-box; }
+
             body {
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+                background-color: var(--bg);
+                background-image:
+                    radial-gradient(circle at 1px 1px, rgba(242,234,217,0.035) 1px, transparent 0);
+                background-size: 3px 3px;
+                color: var(--ink);
                 min-height: 100vh;
-                padding: 20px;
+                padding: 28px 20px;
             }
+
             .container {
-                max-width: 1200px;
+                max-width: 1180px;
                 margin: 0 auto;
-                background: white;
-                border-radius: 12px;
-                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-                overflow: hidden;
             }
+
             .header {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                padding: 30px;
-                text-align: center;
+                display: flex;
+                align-items: baseline;
+                justify-content: space-between;
+                flex-wrap: wrap;
+                gap: 10px;
+                padding: 8px 4px 26px;
+                border-bottom: 1px solid var(--hairline);
+                margin-bottom: 28px;
             }
-            .header h1 {
-                font-size: 2.5em;
-                margin-bottom: 10px;
+            .header .wordmark {
+                font-family: 'Nunito', sans-serif;
+                font-weight: 800;
+                font-size: 2.4em;
+                letter-spacing: 0.01em;
+                color: var(--ink);
             }
-            .header p {
-                font-size: 1.1em;
-                opacity: 0.9;
+            .header .wordmark span { color: var(--amber); }
+            .header .tagline {
+                font-size: 0.95em;
+                color: var(--ink-faint);
             }
-            .content {
+
+            .grid {
                 display: grid;
                 grid-template-columns: 1fr 1fr;
-                gap: 30px;
-                padding: 30px;
+                gap: 22px;
+                margin-bottom: 22px;
             }
-            @media (max-width: 768px) {
-                .content { grid-template-columns: 1fr; }
+            @media (max-width: 820px) {
+                .grid { grid-template-columns: 1fr; }
             }
-            .section {
+
+            .panel {
+                background: var(--card);
+                border-radius: 14px;
+                padding: 22px;
+                box-shadow: 0 12px 30px -18px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.2);
                 display: flex;
                 flex-direction: column;
             }
-            .section h2 {
-                font-size: 1.5em;
-                margin-bottom: 20px;
-                color: #333;
+
+            .panel-title {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                font-family: 'Nunito', sans-serif;
+                font-weight: 700;
+                font-size: 1.15em;
+                margin-bottom: 16px;
+                color: var(--ink);
+            }
+            .panel-title svg { flex-shrink: 0; color: var(--amber); }
+
+            label.field-label {
+                font-size: 0.85em;
+                font-weight: 600;
+                color: var(--ink-dim);
+                margin-bottom: 6px;
+                display: block;
+            }
+
+            select, textarea {
+                width: 100%;
+                background: var(--bg-soft);
+                border: 1px solid var(--hairline);
+                border-radius: 10px;
+                color: var(--ink);
+                font-family: 'Inter', sans-serif;
+                font-size: 0.95em;
+                padding: 12px 14px;
+            }
+            select {
+                margin-bottom: 16px;
+                appearance: none;
             }
             textarea {
                 flex: 1;
-                padding: 15px;
-                border: 2px solid #e0e0e0;
-                border-radius: 8px;
-                font-family: "Monaco", "Courier New", monospace;
-                font-size: 0.95em;
+                min-height: 160px;
                 resize: vertical;
-                min-height: 200px;
-            }
-            textarea:focus {
-                outline: none;
-                border-color: #667eea;
-                box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-            }
-            .messages {
-                background: #f5f5f5;
-                border: 1px solid #e0e0e0;
-                border-radius: 8px;
-                padding: 15px;
-                height: 400px;
-                overflow-y: auto;
-                font-family: "Monaco", "Courier New", monospace;
-                font-size: 0.9em;
-            }
-            .message {
-                padding: 8px 0;
                 line-height: 1.5;
             }
-            .message.info { color: #666; }
-            .message.success { color: #28a745; }
-            .message.error { color: #dc3545; }
-            .message.warning { color: #ffc107; }
-            .button-group {
+            textarea:focus, select:focus {
+                outline: none;
+                border-color: var(--amber);
+                box-shadow: 0 0 0 3px var(--amber-soft);
+            }
+
+            .toggle-row {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                margin: 16px 0 6px;
+                font-size: 0.9em;
+                color: var(--ink-dim);
+            }
+            .toggle-row input { accent-color: var(--amber); width: 16px; height: 16px; }
+
+            .button-row {
                 display: flex;
                 gap: 10px;
-                margin-top: 20px;
+                margin-top: 16px;
+                flex-wrap: wrap;
             }
             button {
-                flex: 1;
-                padding: 12px 20px;
                 border: none;
-                border-radius: 8px;
-                font-size: 1em;
-                font-weight: 600;
+                border-radius: 10px;
+                font-family: 'Nunito', sans-serif;
+                font-weight: 700;
+                font-size: 0.92em;
+                padding: 12px 20px;
                 cursor: pointer;
-                transition: all 0.3s;
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
             }
             .btn-primary {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
+                background: var(--amber);
+                color: #26200f;
+                flex: 1;
             }
-            .btn-primary:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-            }
-            .btn-primary:disabled {
-                opacity: 0.5;
-                cursor: not-allowed;
-                transform: none;
-            }
+            .btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 18px -8px rgba(217,164,65,0.5); }
+            .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
             .btn-secondary {
-                background: #e0e0e0;
-                color: #333;
+                background: var(--card-raised);
+                color: var(--ink-dim);
             }
-            .btn-secondary:hover {
-                background: #d0d0d0;
-            }
-            .status {
-                padding: 15px;
-                border-radius: 8px;
-                text-align: center;
-                font-weight: 600;
-                margin-top: 20px;
+            .btn-secondary:hover { color: var(--ink); }
+            .btn-resume {
+                background: var(--sage);
+                color: #1c2a1a;
                 display: none;
             }
-            .status.show { display: block; }
-            .status.success {
-                background: #d4edda;
-                color: #155724;
-                border: 1px solid #c3e6cb;
+
+            .status-banner {
+                margin-top: 16px;
+                padding: 12px 14px;
+                border-radius: 10px;
+                font-size: 0.9em;
+                font-weight: 600;
+                display: none;
+                align-items: center;
+                gap: 10px;
             }
-            .status.error {
-                background: #f8d7da;
-                color: #721c24;
-                border: 1px solid #f5c6cb;
-            }
-            .status.running {
-                background: #cfe2ff;
-                color: #084298;
-                border: 1px solid #b6d4fe;
-            }
-            .status.warning {
-                background: #fff3cd;
-                color: #664d03;
-                border: 1px solid #ffe69c;
-            }
+            .status-banner.show { display: flex; }
+            .status-banner.running { background: var(--amber-soft); color: var(--amber); }
+            .status-banner.success { background: var(--sage-soft); color: var(--sage); }
+            .status-banner.warning { background: var(--amber-soft); color: var(--amber); }
+            .status-banner.error   { background: var(--rust-soft); color: var(--rust); }
+
             .spinner {
-                display: inline-block;
-                width: 12px;
-                height: 12px;
+                width: 13px; height: 13px;
                 border: 2px solid currentColor;
                 border-right-color: transparent;
                 border-radius: 50%;
-                animation: spin 0.6s linear infinite;
+                animation: spin 0.7s linear infinite;
+                flex-shrink: 0;
             }
-            @keyframes spin {
-                to { transform: rotate(360deg); }
+            @keyframes spin { to { transform: rotate(360deg); } }
+
+            .overview-doc {
+                display: none;
+                white-space: pre-wrap;
+                background: var(--bg-soft);
+                border: 1px solid var(--hairline);
+                border-left: 3px solid var(--amber);
+                border-radius: 10px;
+                padding: 14px;
+                margin-top: 12px;
+                font-size: 0.85em;
+                color: var(--ink-dim);
+                line-height: 1.5;
+                max-height: 220px;
+                overflow-y: auto;
             }
-            .stats {
+
+            .log {
+                background: var(--bg-soft);
+                border: 1px solid var(--hairline);
+                border-radius: 10px;
+                padding: 14px;
+                height: 380px;
+                overflow-y: auto;
+                font-size: 0.87em;
+                line-height: 1.7;
+            }
+            .log-entry { display: flex; align-items: flex-start; gap: 8px; padding: 3px 0; }
+            .log-entry svg { flex-shrink: 0; margin-top: 3px; }
+            .log-entry.info svg { color: var(--ink-faint); }
+            .log-entry.success svg { color: var(--sage); }
+            .log-entry.warning svg { color: var(--amber); }
+            .log-entry.error svg { color: var(--rust); }
+            .log-entry.info span { color: var(--ink-dim); }
+            .log-entry.success span { color: var(--sage); }
+            .log-entry.warning span { color: var(--amber); }
+            .log-entry.error span { color: var(--rust); }
+
+            .code-output {
+                flex: 1;
+                min-height: 260px;
+                background: var(--bg-soft);
+                font-family: 'SF Mono', 'Consolas', monospace;
+                font-size: 0.85em;
+                color: var(--ink);
+                line-height: 1.6;
+            }
+
+            .stats-row {
                 display: grid;
                 grid-template-columns: repeat(3, 1fr);
-                gap: 15px;
-                margin-top: 20px;
+                gap: 12px;
             }
             .stat {
-                background: #f5f5f5;
-                padding: 15px;
-                border-radius: 8px;
+                background: var(--card-raised);
+                border-radius: 10px;
+                padding: 16px;
                 text-align: center;
             }
             .stat-value {
-                font-size: 2em;
-                font-weight: bold;
-                color: #667eea;
+                font-family: 'Nunito', sans-serif;
+                font-weight: 800;
+                font-size: 1.8em;
+                color: var(--amber);
             }
             .stat-label {
-                font-size: 0.9em;
-                color: #666;
-                margin-top: 5px;
+                font-size: 0.8em;
+                color: var(--ink-faint);
+                margin-top: 4px;
             }
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <h1>♾️ Aeon</h1>
-                <p>Multi-agent code orchestrator — Groq/Gemini/Mistral/Cerebras/SambaNova/Cohere/OpenRouter + Ollama fallback — Python · HTML · C</p>
+                <div>
+                    <div class="wordmark">Ae<span>o</span>n</div>
+                    <div class="tagline">Describe a task. Aeon plans it, writes it, checks it, and keeps refining until it's ready.</div>
+                </div>
             </div>
-            
-            <div class="content">
-                <div class="section">
-                    <h2>Your Task</h2>
-                    <label for="languageSelect" style="font-weight:600; margin-bottom:6px; display:block;">Language</label>
-                    <select id="languageSelect" style="padding:10px; border:2px solid #e0e0e0; border-radius:8px; margin-bottom:15px; font-size:0.95em;">
+
+            <div class="grid">
+                <div class="panel">
+                    <div class="panel-title">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                        Your task
+                    </div>
+                    <label class="field-label" for="languageSelect">Language</label>
+                    <select id="languageSelect">
                         <option value="python">Python</option>
                         <option value="html">HTML / CSS / JS</option>
                         <option value="c">C</option>
                     </select>
+                    <label class="field-label" for="taskInput">What should Aeon build?</label>
                     <textarea id="taskInput" placeholder="Describe the code you want to create..."></textarea>
-                    <label style="display:flex; align-items:center; gap:8px; margin:10px 0; font-weight:500;">
+                    <label class="toggle-row">
                         <input type="checkbox" id="autoResumeToggle" checked>
-                        Auto-resume when a rate limit clears (uncheck to require your approval instead)
+                        Resume automatically once a paused step becomes available again
                     </label>
-                    <div class="button-group">
+                    <div class="button-row">
                         <button class="btn-primary" id="orchestrateBtn" onclick="startOrchestration()">
-                            Start Orchestration
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>
+                            Start
                         </button>
                         <button class="btn-secondary" onclick="clearAll()">Clear</button>
-                        <button class="btn-secondary" id="resumeBtn" style="display:none;" onclick="resumeOrchestration()">
-                            ▶ Resume Now
+                        <button class="btn-resume" id="resumeBtn" onclick="resumeOrchestration()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>
+                            Resume now
                         </button>
                     </div>
-                    <div id="status" class="status"></div>
-                    <div id="overviewDoc" style="display:none; white-space:pre-wrap; background:#fff8e1; border:1px solid #ffe082; border-radius:8px; padding:12px; margin-top:10px; font-size:0.9em;"></div>
+                    <div id="status" class="status-banner"></div>
+                    <div id="overviewDoc" class="overview-doc"></div>
                 </div>
-                
-                <div class="section">
-                    <h2>Live Messages</h2>
-                    <div class="messages" id="messages"></div>
+
+                <div class="panel">
+                    <div class="panel-title">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+                        Progress
+                    </div>
+                    <div class="log" id="messages"></div>
                 </div>
             </div>
-            
-            <div class="content">
-                <div class="section">
-                    <h2>Generated Code</h2>
-                    <textarea id="codeOutput" readonly></textarea>
-                    <button class="btn-primary" style="margin-top: 10px;" onclick="copyCode()">Copy to Clipboard</button>
+
+            <div class="grid">
+                <div class="panel">
+                    <div class="panel-title">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg>
+                        Generated code
+                    </div>
+                    <textarea class="code-output" id="codeOutput" readonly></textarea>
+                    <div class="button-row">
+                        <button class="btn-secondary" onclick="copyCode()">
+                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                            Copy to clipboard
+                        </button>
+                    </div>
                 </div>
-                
-                <div class="section">
-                    <h2>Statistics</h2>
-                    <div class="stats">
+
+                <div class="panel">
+                    <div class="panel-title">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9M13 17V5M8 17v-4"/></svg>
+                        Statistics
+                    </div>
+                    <div class="stats-row">
                         <div class="stat">
-                            <div class="stat-value" id="qualityScore">-</div>
-                            <div class="stat-label">Quality Score</div>
+                            <div class="stat-value" id="qualityScore">—</div>
+                            <div class="stat-label">Quality score</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value" id="iterationCount">-</div>
+                            <div class="stat-value" id="iterationCount">—</div>
                             <div class="stat-label">Iterations</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value">$0</div>
-                            <div class="stat-label">Cost (FREE)</div>
+                            <div class="stat-value">Free</div>
+                            <div class="stat-label">Cost</div>
                         </div>
                     </div>
                 </div>
@@ -1286,7 +1396,14 @@ def serve_ui():
         <script>
             let currentOrchId = null;
             let pollInterval = null;
-            
+
+            const ICONS = {
+                info: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>',
+                success: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>',
+                warning: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>',
+                error: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/></svg>'
+            };
+
             async function startOrchestration() {
                 const task = document.getElementById("taskInput").value.trim();
                 const language = document.getElementById("languageSelect").value;
@@ -1294,8 +1411,7 @@ def serve_ui():
                     alert("Please enter a task");
                     return;
                 }
-                
-                // Check health
+
                 try {
                     const health = await fetch("/api/health").then(r => r.json());
                     if (health.status !== "ready") {
@@ -1306,13 +1422,13 @@ def serve_ui():
                     alert("Cannot connect to backend");
                     return;
                 }
-                
+
                 document.getElementById("orchestrateBtn").disabled = true;
                 clearMessages();
                 document.getElementById("codeOutput").value = "";
-                document.getElementById("qualityScore").textContent = "-";
-                document.getElementById("iterationCount").textContent = "-";
-                
+                document.getElementById("qualityScore").textContent = "—";
+                document.getElementById("iterationCount").textContent = "—";
+
                 const auto_resume = document.getElementById("autoResumeToggle").checked;
                 document.getElementById("overviewDoc").style.display = "none";
                 document.getElementById("resumeBtn").style.display = "none";
@@ -1322,61 +1438,56 @@ def serve_ui():
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ task, language, auto_resume })
                 });
-                
+
                 const data = await response.json();
                 currentOrchId = data.id;
-                
+
                 showStatus("running", `Orchestration started (ID: ${currentOrchId})`);
-                addMessage("info", "🚀 Starting orchestration...");
-                
-                // Poll for updates
+                addMessage("info", "Starting orchestration...");
+
                 pollInterval = setInterval(pollStatus, 1000);
             }
-            
+
             async function pollStatus() {
                 if (!currentOrchId) return;
-                
+
                 try {
                     const response = await fetch(`/api/status/${currentOrchId}`);
                     const state = await response.json();
-                    
-                    // Update messages
+
                     const messagesDiv = document.getElementById("messages");
                     const lastCount = messagesDiv.children.length;
-                    
+
                     if (state.messages.length > lastCount) {
                         state.messages.slice(lastCount).forEach(msg => {
                             addMessage(msg.level, msg.text);
                         });
                     }
-                    
-                    // Update stats
+
                     if (state.quality_score) {
                         document.getElementById("qualityScore").textContent = state.quality_score + "/100";
                     }
                     if (state.iteration) {
                         document.getElementById("iterationCount").textContent = state.iteration;
                     }
-                    
-                    // Update code
+
                     if (state.code) {
                         document.getElementById("codeOutput").value = state.code;
                     }
-                    
-                    // Check if done
+
                     if (state.status === "success") {
                         clearInterval(pollInterval);
-                        showStatus("success", "✅ Orchestration complete!");
+                        showStatus("success", "Orchestration complete.");
                         document.getElementById("orchestrateBtn").disabled = false;
                     } else if (state.status === "safety_ceiling_reached") {
                         clearInterval(pollInterval);
-                        showStatus("error", "Safety ceiling reached");
+                        showStatus("error", "Safety ceiling reached.");
                         document.getElementById("orchestrateBtn").disabled = false;
                     } else if (state.status === "paused") {
                         clearInterval(pollInterval);
                         const waitMsg = state.auto_resume
-                            ? "⏸ Paused — will auto-resume once provider quota resets."
-                            : "⏸ Paused — waiting for your approval to continue.";
+                            ? "Paused — will resume automatically once available."
+                            : "Paused — waiting for your approval to continue.";
                         showStatus("warning", waitMsg);
                         document.getElementById("orchestrateBtn").disabled = false;
                         if (state.overview_doc) {
@@ -1384,7 +1495,7 @@ def serve_ui():
                             docDiv.textContent = state.overview_doc;
                             docDiv.style.display = "block";
                         }
-                        document.getElementById("resumeBtn").style.display = "inline-block";
+                        document.getElementById("resumeBtn").style.display = "inline-flex";
                     }
                 } catch (e) {
                     console.error("Poll error:", e);
@@ -1395,46 +1506,51 @@ def serve_ui():
                 if (!currentOrchId) return;
                 document.getElementById("resumeBtn").style.display = "none";
                 await fetch(`/api/resume/${currentOrchId}`, { method: "POST" });
-                showStatus("running", "▶ Resuming...");
+                showStatus("running", "Resuming...");
                 pollInterval = setInterval(pollStatus, 1000);
             }
-            
+
             function addMessage(level, text) {
                 const messagesDiv = document.getElementById("messages");
-                const msg = document.createElement("div");
-                msg.className = "message " + level;
-                msg.textContent = text;
-                messagesDiv.appendChild(msg);
+                const entry = document.createElement("div");
+                entry.className = "log-entry " + level;
+                const icon = ICONS[level] || ICONS.info;
+                entry.innerHTML = icon + "<span></span>";
+                entry.querySelector("span").textContent = text;
+                messagesDiv.appendChild(entry);
                 messagesDiv.scrollTop = messagesDiv.scrollHeight;
             }
-            
+
             function clearMessages() {
                 document.getElementById("messages").innerHTML = "";
             }
-            
+
             function showStatus(type, text) {
                 const status = document.getElementById("status");
-                status.className = "status show " + type;
+                status.className = "status-banner show " + type;
                 if (type === "running") {
-                    status.innerHTML = `<span class="spinner"></span> ${text}`;
+                    status.innerHTML = '<span class="spinner"></span><span></span>';
+                    status.querySelector("span:last-child").textContent = text;
                 } else {
-                    status.textContent = text;
+                    status.innerHTML = (ICONS[type === "error" ? "error" : type === "success" ? "success" : "warning"] || "") + "<span></span>";
+                    status.querySelector("span").textContent = text;
                 }
             }
-            
+
             function copyCode() {
                 const code = document.getElementById("codeOutput");
                 code.select();
                 document.execCommand("copy");
-                alert("Code copied to clipboard!");
             }
-            
+
             function clearAll() {
                 document.getElementById("taskInput").value = "";
                 clearMessages();
                 document.getElementById("codeOutput").value = "";
                 document.getElementById("status").classList.remove("show");
                 document.getElementById("orchestrateBtn").disabled = false;
+                document.getElementById("resumeBtn").style.display = "none";
+                document.getElementById("overviewDoc").style.display = "none";
                 if (pollInterval) clearInterval(pollInterval);
             }
         </script>
@@ -1444,7 +1560,7 @@ def serve_ui():
     return html, 200, {"Content-Type": "text/html"}
 
 if __name__ == "__main__":
-    print("🚀 Multi-Agent Orchestrator Backend")
+    print("Aeon — multi-agent code orchestrator backend")
     print("Starting Flask server on http://localhost:5000")
     print("Make sure Ollama is running: ollama serve")
     app.run(host="0.0.0.0", port=5000, debug=False)
