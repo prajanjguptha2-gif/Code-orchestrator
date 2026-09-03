@@ -54,7 +54,7 @@ def _strip_code_fences(text: str) -> str:
 
 
 # --- Per-provider rate-limit tracking -------------------------------------
-# When a provider returns 429 (or a Retry-After header), we remember the
+# When a provider returns 429 (or 503/Retry-After), we remember the
 # timestamp it becomes available again, so the chain skips it without
 # wasting a request until then.
 _provider_cooldowns = {}  # provider_name -> unix timestamp when available again
@@ -65,7 +65,7 @@ def _is_resting(name: str) -> bool:
 
 def _mark_rate_limited(name: str, retry_after_seconds: float = 60.0):
     _provider_cooldowns[name] = time.time() + retry_after_seconds
-    print(f"[{name}] rate-limited, resting for {retry_after_seconds:.0f}s", file=sys.stderr)
+    print(f"[{name}] rate-limited/overloaded, resting for {retry_after_seconds:.0f}s", file=sys.stderr)
 
 def provider_status() -> dict:
     """For the overview doc / status endpoint: which providers are resting."""
@@ -79,14 +79,17 @@ def provider_status() -> dict:
 # --- Individual provider callers ------------------------------------------
 # Each returns the raw text on success, or None on any failure (missing key,
 # network error, bad response) so the chain can move to the next provider.
-# A 429 additionally calls _mark_rate_limited() so we skip it next time too.
 
 def _openai_style_call(name: str, url: str, api_key: str, model: str,
                         prompt: str, max_tokens: int, extra_headers: dict = None) -> Optional[str]:
     """Shared logic for any provider using an OpenAI-compatible chat
     completions endpoint (Groq, Mistral, Cerebras, OpenRouter, etc.)."""
-    if not api_key or _is_resting(name):
+    if not api_key:
+        print(f"[{name}] skipped: no API key set", file=sys.stderr)
         return None
+    if _is_resting(name):
+        return None
+
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if extra_headers:
         headers.update(extra_headers)
@@ -103,8 +106,12 @@ def _openai_style_call(name: str, url: str, api_key: str, model: str,
             timeout=60
         )
         if response.status_code == 200:
-            return response.json()["choices"][0]["message"]["content"]
-        if response.status_code == 429:
+            res_data = response.json()
+            if "choices" in res_data and len(res_data["choices"]) > 0:
+                return res_data["choices"][0]["message"]["content"]
+            print(f"[{name}] unexpected response format: {res_data}", file=sys.stderr)
+            return None
+        if response.status_code in (429, 503):
             retry_after = response.headers.get("Retry-After")
             _mark_rate_limited(name, float(retry_after) if retry_after else 60.0)
         else:
@@ -122,11 +129,14 @@ def call_groq(prompt, max_tokens):
 
 def call_gemini(prompt, max_tokens):
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not api_key or _is_resting("gemini"):
+    if not api_key:
+        print("[gemini] skipped: no API key set", file=sys.stderr)
+        return None
+    if _is_resting("gemini"):
         return None
     try:
         response = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={api_key}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}",
             json={
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"temperature": 0.3, "maxOutputTokens": max_tokens},
@@ -134,8 +144,15 @@ def call_gemini(prompt, max_tokens):
             timeout=60
         )
         if response.status_code == 200:
-            return response.json()["candidates"][0]["content"]["parts"][0]["text"]
-        if response.status_code == 429:
+            data = response.json()
+            candidates = data.get("candidates", [])
+            if candidates and "content" in candidates[0] and "parts" in candidates[0]["content"]:
+                parts = candidates[0]["content"]["parts"]
+                if parts and "text" in parts[0]:
+                    return parts[0]["text"]
+            print(f"[gemini] empty parts or blocked response: {data}", file=sys.stderr)
+            return None
+        if response.status_code in (429, 503):
             _mark_rate_limited("gemini", 60.0)
         else:
             print(f"[gemini] HTTP {response.status_code}: {response.text[:200]}", file=sys.stderr)
@@ -161,7 +178,10 @@ def call_sambanova(prompt, max_tokens):
 
 def call_cohere(prompt, max_tokens):
     api_key = os.environ.get("COHERE_API_KEY", "").strip()
-    if not api_key or _is_resting("cohere"):
+    if not api_key:
+        print("[cohere] skipped: no API key set", file=sys.stderr)
+        return None
+    if _is_resting("cohere"):
         return None
     try:
         response = requests.post(
@@ -176,8 +196,12 @@ def call_cohere(prompt, max_tokens):
             timeout=60
         )
         if response.status_code == 200:
-            return response.json()["message"]["content"][0]["text"]
-        if response.status_code == 429:
+            res_data = response.json()
+            if "message" in res_data and "content" in res_data["message"] and len(res_data["message"]["content"]) > 0:
+                return res_data["message"]["content"][0]["text"]
+            print(f"[cohere] unexpected format: {res_data}", file=sys.stderr)
+            return None
+        if response.status_code in (429, 503):
             _mark_rate_limited("cohere", 60.0)
         else:
             print(f"[cohere] HTTP {response.status_code}: {response.text[:200]}", file=sys.stderr)
@@ -193,7 +217,10 @@ def call_openrouter(prompt, max_tokens):
 
 def call_huggingface(prompt, max_tokens):
     api_key = os.environ.get("HUGGINGFACE_API_KEY", "").strip()
-    if not api_key or _is_resting("huggingface"):
+    if not api_key:
+        print("[huggingface] skipped: no API key set", file=sys.stderr)
+        return None
+    if _is_resting("huggingface"):
         return None
     try:
         response = requests.post(
@@ -208,7 +235,7 @@ def call_huggingface(prompt, max_tokens):
         )
         if response.status_code == 200:
             return response.json()["choices"][0]["message"]["content"]
-        if response.status_code == 429:
+        if response.status_code in (429, 503):
             _mark_rate_limited("huggingface", 60.0)
         return None
     except Exception as e:
@@ -216,7 +243,9 @@ def call_huggingface(prompt, max_tokens):
         return None
 
 def call_ollama(prompt, max_tokens):
-    name = "ollama"
+    # Avoid spending time trying to hit local Ollama on cloud hosts
+    if os.environ.get("RENDER"):
+        return None
     try:
         response = requests.post(
             "http://localhost:11434/api/generate",
@@ -232,20 +261,10 @@ def call_ollama(prompt, max_tokens):
             return response.json()["response"]
         return None
     except Exception:
-        # Ollama not running — not an error worth logging loudly, it's an
-        # expected state when the app is deployed to the cloud with no
-        # local model available.
         return None
 
 
 # --- Persistent state store -------------------------------------------
-# Render's free tier wipes local disk on every sleep/restart/redeploy, so a
-# paused run can't survive on a local JSON file alone. If UPSTASH_REDIS_URL
-# and UPSTASH_REDIS_TOKEN are set, state is saved there instead (free tier,
-# doesn't expire, tiny setup — see CLOUD_SETUP.md). Falls back to a local
-# file automatically for local development, where disk persistence isn't a
-# problem.
-
 UPSTASH_URL = os.environ.get("UPSTASH_REDIS_URL", "").strip()
 UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_TOKEN", "").strip()
 LOCAL_STATE_DIR = Path("orchestration_runs")
@@ -286,7 +305,6 @@ def load_run_state(orch_id: str) -> Optional[dict]:
 
 
 # --- Role → provider chain --------------------------------------------
-# Ollama is appended to every chain as the guaranteed-available fallback.
 ROLE_CHAINS = {
     "coder":       [call_groq, call_gemini],
     "reviewer":    [call_mistral, call_cerebras, call_sambanova],
@@ -313,12 +331,6 @@ def call_model(prompt: str, max_tokens: int = 1500) -> Optional[str]:
 
 # ============================================================================
 # TASK COMPLEXITY
-#
-# One quick, cheap classification call up front tags the task as simple /
-# medium / complex, so the rest of the pipeline can scale its effort to
-# match — a one-line script shouldn't get the same 4-6 step plan,
-# "handle ALL edge cases" coder guidelines, and nitpicking strict review as
-# a real application. This is the fix for simple tasks taking forever.
 # ============================================================================
 
 COMPLEXITY_CONFIG = {
@@ -436,31 +448,24 @@ class OrchestratorState:
     def __init__(self):
         self.original_task = ""
         self.language = "python"
-        # "auto" lets classify_complexity_agent decide; otherwise the user
-        # forced a tier via the UI override and classification is skipped.
         self.complexity_setting = "auto"
-        self.complexity = "medium"   # resolved tier, once known
+        self.complexity = "medium"
         self.plan = ""
         self.current_code = ""
         self.files_modified = []
         self.test_results = []
         self.reviews = []
         self.iteration = 0
-        # Scaled by complexity tier once known (see COMPLEXITY_CONFIG) — a
-        # simple task gets a much tighter ceiling so it can't spiral into a
-        # long refinement loop over nitpicks. Default here covers the brief
-        # window before classification runs.
         self.safety_ceiling = 30
         self.quality_score = 0
         self.status = "initializing"
         self.messages = []
-        self.auto_resume = True   # per-run toggle — set False to require manual approval
-        self.overview_doc = ""    # populated when the run pauses
+        self.auto_resume = True
+        self.overview_doc = ""
 
     def add_message(self, level: str, text: str):
-        """Add a timestamped message"""
         self.messages.append({
-            "level": level,  # info, success, error, warning
+            "level": level,
             "text": text,
             "iteration": self.iteration
         })
@@ -588,7 +593,6 @@ def executor_agent(code: str, state: OrchestratorState, file_path: str = None) -
     elif ext == ".html":
         _validate_html(file_path, state, results)
     else:
-        # Unknown language: just confirm the file was written.
         results["syntax_ok"] = True
         results["execution_ok"] = True
         results["output"].append("File written (no automated validator for this language)")
@@ -682,9 +686,6 @@ def _validate_c(file_path: str, state: OrchestratorState, results: dict):
         results["errors"].append(f"Execution error: {e}")
 
 def _validate_html(file_path: str, state: OrchestratorState, results: dict):
-    """HTML doesn't 'execute' server-side, so validate structure instead:
-    well-formed tags and a check that any <script> content at least parses
-    as valid JS-like syntax via a lightweight brace/paren balance check."""
     from html.parser import HTMLParser
 
     class _Checker(HTMLParser):
@@ -693,7 +694,7 @@ def _validate_html(file_path: str, state: OrchestratorState, results: dict):
             self.stack = []
             self.errors = []
             self.void_tags = {"br", "hr", "img", "input", "meta", "link", "area",
-                               "base", "col", "embed", "source", "track", "wbr"}
+                              "base", "col", "embed", "source", "track", "wbr"}
 
         def handle_starttag(self, tag, attrs):
             if tag not in self.void_tags:
@@ -703,12 +704,10 @@ def _validate_html(file_path: str, state: OrchestratorState, results: dict):
             if self.stack and self.stack[-1] == tag:
                 self.stack.pop()
             elif tag in self.stack:
-                # Mismatched but recoverable — pop until we find it
                 while self.stack and self.stack[-1] != tag:
                     self.stack.pop()
                 if self.stack:
                     self.stack.pop()
-            # else: stray closing tag, ignore
 
     try:
         with open(file_path, "r", encoding="utf-8") as f:
@@ -726,8 +725,6 @@ def _validate_html(file_path: str, state: OrchestratorState, results: dict):
         results["output"].append("HTML structure valid")
         state.add_message("success", "HTML structure valid")
 
-        # Basic brace balance check for embedded <script> JS
-        import re
         scripts = re.findall(r"<script[^>]*>(.*?)</script>", content, re.DOTALL | re.IGNORECASE)
         js_ok = True
         for script in scripts:
@@ -784,8 +781,6 @@ Output ONLY JSON.
     try:
         review = json.loads(review_text)
     except Exception:
-        # Model may have added stray text around the JSON — try to
-        # extract the first {...} block before giving up.
         match = re.search(r"\{.*\}", review_text, re.DOTALL)
         if match:
             try:
@@ -800,902 +795,9 @@ Output ONLY JSON.
     state.quality_score = review.get("quality_score", 0)
 
     if review.get("pass"):
-        state.add_message("success", f"PASS — quality: {review.get('quality_score', 0)}/100")
+        state.add_message("success", f"PASS — quality score {state.quality_score}/100")
     else:
-        state.add_message("warning", f"NEEDS WORK — quality: {review.get('quality_score', 0)}/100")
+        state.add_message("warning", f"NEEDS IMPROVEMENT — score {state.quality_score}/100")
 
+    state.reviews.append(json.dumps(review))
     return review
-
-
-def documenter_agent(code: str, task: str, state: "OrchestratorState") -> str:
-    """Runs once the reviewer passes — writes a short docs/summary blurb
-    for the finished code. Non-critical: if every documenter provider is
-    unavailable, we just skip it rather than blocking on it."""
-    state.add_message("info", "Documenter: writing summary...")
-    lang = get_language(state)
-    prompt = f"""
-Write a short (5-8 sentence) plain-English summary of this {lang['prompt_name']} code for a README.
-Explain what it does and how to use/run it. No code blocks, just prose.
-
-Task it fulfills: {task}
-
-Code:
-{code}
-"""
-    doc_text, used = call_model_for_role("documenter", prompt, max_tokens=500)
-    if doc_text is None:
-        state.add_message("warning", "Documenter unavailable — skipping (non-critical)")
-        return ""
-    state.add_message("success", f"Summary written (via {used})")
-    return doc_text.strip()
-
-
-def generate_overview_doc(state: "OrchestratorState") -> str:
-    """Builds the pause/handoff summary shown when every provider chain for
-    the current step has run dry mid-loop."""
-    lang = get_language(state)
-    resting = provider_status()
-    resting_lines = "\n".join(
-        f"- {name}: resumes in ~{info['resumes_in_s']}s" for name, info in resting.items() if info["resting"]
-    ) or "- (none currently tracked as rate-limited — likely a missing API key or a non-429 failure)"
-    return f"""# Orchestration Paused — Overview
-
-**Task:** {state.original_task}
-**Language:** {lang['label']}
-**Iterations completed:** {state.iteration}
-**Best quality score so far:** {state.quality_score}/100
-
-## What was tried
-{state.plan or '(no plan generated yet)'}
-
-## Why it paused
-Every provider available for the current step is currently unavailable (rate-limited or unconfigured).
-
-## Providers currently resting
-{resting_lines}
-
-## What happens next
-{"This run will resume automatically once a provider's quota should have reset." if state.auto_resume else "This run is waiting for your approval — resume it manually when ready."}
-"""
-
-# ============================================================================
-# ORCHESTRATION LOOP
-# ============================================================================
-
-def run_orchestration_loop(task: str, orchestration_id: str, language: str = "python",
-                            auto_resume: bool = True, resumed_state: "OrchestratorState" = None,
-                            complexity_setting: str = "auto"):
-    """Run the orchestration loop. No fixed iteration cap beyond the
-    complexity-scaled safety_ceiling — keeps going until the reviewer
-    passes, or every provider for the current step is exhausted (all
-    rate-limited / unconfigured / failing), at which point it writes an
-    overview doc and either auto-resumes later or pauses for approval,
-    depending on state.auto_resume."""
-    state = resumed_state or OrchestratorState()
-    if resumed_state is None:
-        state.original_task = task
-        state.language = language if language in LANGUAGES else "python"
-        state.auto_resume = auto_resume
-        state.complexity_setting = complexity_setting if complexity_setting in ("auto", *COMPLEXITY_CONFIG) else "auto"
-    state.status = "running"
-    active_orchestrations[orchestration_id] = state
-
-    if state.complexity_setting != "auto":
-        state.complexity = state.complexity_setting
-    elif not state.plan:
-        # Only classify once, before the first plan is made — a resumed run
-        # that already has a plan keeps whatever tier it started with.
-        classify_complexity_agent(task, state)
-    state.safety_ceiling = COMPLEXITY_CONFIG[state.complexity]["safety_ceiling"]
-
-    if not state.plan:
-        coordinator_agent(task, state)
-        if not state.plan:
-            state.status = "paused"
-            state.overview_doc = generate_overview_doc(state)
-            save_run_state(orchestration_id, state)
-            state.add_message("warning", "Paused — coordinator has no available provider right now.")
-            return
-
-    while state.iteration < state.safety_ceiling:
-        state.iteration += 1
-        state.add_message("info", f"--- ITERATION {state.iteration} ---")
-
-        code = coder_agent(task, state)
-        if not code:
-            # Every coder-chain provider (incl. catch-all + Ollama) failed.
-            state.status = "paused"
-            state.overview_doc = generate_overview_doc(state)
-            save_run_state(orchestration_id, state)
-            state.add_message("warning", "Paused — no coder provider available right now.")
-            return
-
-        state.current_code = code
-        exec_results = executor_agent(code, state)
-        review = reviewer_agent(code, task, exec_results, state)
-
-        if review.get("pass") and exec_results["syntax_ok"] and exec_results["execution_ok"]:
-            state.status = "success"
-            state.add_message("success", "SUCCESS — code is production-ready.")
-            doc = documenter_agent(code, task, state)
-            if doc:
-                state.overview_doc = doc
-            save_run_state(orchestration_id, state)
-            return
-
-        save_run_state(orchestration_id, state)  # checkpoint after every iteration
-        state.add_message("info", "Refining...")
-
-    state.status = "safety_ceiling_reached"
-    state.add_message("warning", f"Safety ceiling reached ({state.safety_ceiling} iterations for a '{state.complexity}' task). Best: {state.quality_score}/100")
-    save_run_state(orchestration_id, state)
-
-# ============================================================================
-# AUTH
-#
-# Once this app is deployed publicly (Render), anyone with the URL could
-# submit tasks that compile and run code on the server. If APP_PASSWORD is
-# set, every /api/* route requires HTTP Basic Auth with that password
-# (any username). If it's not set (e.g. local dev on localhost), auth is
-# skipped entirely — nothing breaks your existing local workflow.
-# ============================================================================
-
-APP_PASSWORD = os.environ.get("APP_PASSWORD", "").strip()
-
-@app.before_request
-def _require_auth():
-    if not APP_PASSWORD:
-        return  # no password configured — auth disabled (local dev)
-    if not request.path.startswith("/api/") and request.path != "/":
-        return
-    auth = request.authorization
-    if not auth or auth.password != APP_PASSWORD:
-        return Response(
-            "Authentication required", 401,
-            {"WWW-Authenticate": 'Basic realm="Orchestrator"'}
-        )
-
-# ============================================================================
-# API ROUTES
-# ============================================================================
-
-@app.route("/api/health", methods=["GET"])
-def health():
-    """Check if at least one model provider is available for the coder role
-    (the most important one — nothing works without it)."""
-    configured = [
-        name for name, key in [
-            ("groq", os.environ.get("GROQ_API_KEY")),
-            ("gemini", os.environ.get("GEMINI_API_KEY")),
-            ("mistral", os.environ.get("MISTRAL_API_KEY")),
-            ("cerebras", os.environ.get("CEREBRAS_API_KEY")),
-            ("sambanova", os.environ.get("SAMBANOVA_API_KEY")),
-            ("cohere", os.environ.get("COHERE_API_KEY")),
-            ("openrouter", os.environ.get("OPENROUTER_API_KEY")),
-            ("huggingface", os.environ.get("HUGGINGFACE_API_KEY")),
-        ] if key
-    ]
-    ollama_up = False
-    try:
-        requests.get("http://localhost:11434/api/tags", timeout=2)
-        ollama_up = True
-    except Exception:
-        pass
-    if configured or ollama_up:
-        return jsonify({
-            "status": "ready",
-            "cloud_providers_configured": configured,
-            "ollama_available": ollama_up,
-        })
-    return jsonify({
-        "status": "error",
-        "message": "No provider API keys are set, and Ollama isn't running. "
-                   "Set at least one provider key (see CLOUD_SETUP.md) or run Ollama locally."
-    }), 503
-
-@app.route("/api/languages", methods=["GET"])
-def languages():
-    """List supported target languages for the UI dropdown."""
-    return jsonify({key: cfg["label"] for key, cfg in LANGUAGES.items()})
-
-@app.route("/api/orchestrate", methods=["POST"])
-def orchestrate():
-    """Start a new orchestration"""
-    data = request.json
-    task = data.get("task", "").strip()
-    language = data.get("language", "python").strip().lower()
-    complexity_setting = data.get("complexity", "auto").strip().lower()
-
-    if not task:
-        return jsonify({"error": "Task is required"}), 400
-
-    if language not in LANGUAGES:
-        return jsonify({"error": f"Unsupported language '{language}'. Choose from: {', '.join(LANGUAGES)}"}), 400
-
-    if complexity_setting not in ("auto", *COMPLEXITY_CONFIG):
-        return jsonify({"error": f"Unsupported complexity '{complexity_setting}'. Choose from: auto, {', '.join(COMPLEXITY_CONFIG)}"}), 400
-
-    auto_resume = bool(data.get("auto_resume", True))  # per-run toggle
-
-    # Generate unique ID
-    import uuid
-    orch_id = str(uuid.uuid4())[:8]
-
-    # Run in background thread
-    thread = threading.Thread(
-        target=run_orchestration_loop,
-        args=(task, orch_id, language, auto_resume, None, complexity_setting)
-    )
-    thread.daemon = True
-    thread.start()
-
-    return jsonify({"id": orch_id, "status": "started"}), 202
-
-@app.route("/api/status/<orch_id>", methods=["GET"])
-def status(orch_id):
-    """Get status of an orchestration"""
-    state = active_orchestrations.get(orch_id)
-    if state is None:
-        saved = load_run_state(orch_id)
-        if saved is None:
-            return jsonify({"error": "Orchestration not found"}), 404
-        return jsonify(saved)
-    return jsonify(state.to_dict())
-
-@app.route("/api/resume/<orch_id>", methods=["POST"])
-def resume(orch_id):
-    """Manually resume a paused run (used when auto_resume is off for
-    that run, or if you want to force a retry before its cooldown ends)."""
-    state = active_orchestrations.get(orch_id)
-    if state is None:
-        saved = load_run_state(orch_id)
-        if saved is None:
-            return jsonify({"error": "Orchestration not found"}), 404
-        state = _state_from_dict(saved)
-    if state.status != "paused":
-        return jsonify({"error": f"Run is not paused (status: {state.status})"}), 400
-
-    thread = threading.Thread(
-        target=run_orchestration_loop,
-        args=(state.original_task, orch_id, state.language, state.auto_resume, state, state.complexity_setting)
-    )
-    thread.daemon = True
-    thread.start()
-    return jsonify({"id": orch_id, "status": "resuming"}), 202
-
-@app.route("/api/toggle-auto-resume/<orch_id>", methods=["POST"])
-def toggle_auto_resume(orch_id):
-    """Flip the per-run auto-resume setting."""
-    state = active_orchestrations.get(orch_id)
-    if state is None:
-        return jsonify({"error": "Orchestration not found (or not in memory — reload won't preserve this toggle across a server restart)"}), 404
-    state.auto_resume = bool(request.json.get("auto_resume", True))
-    save_run_state(orch_id, state)
-    return jsonify({"id": orch_id, "auto_resume": state.auto_resume})
-
-
-def _state_from_dict(d: dict) -> "OrchestratorState":
-    """Rebuild an OrchestratorState from a saved dict (for resuming after
-    the app restarted and lost in-memory state)."""
-    state = OrchestratorState()
-    state.original_task = d.get("task", "")
-    state.language = d.get("language", "python")
-    state.complexity_setting = d.get("complexity_setting", "auto")
-    state.complexity = d.get("complexity", "medium")
-    state.plan = d.get("plan", "")
-    state.current_code = d.get("code", "")
-    state.iteration = d.get("iteration", 0)
-    state.quality_score = d.get("quality_score", 0)
-    state.status = d.get("status", "paused")
-    state.messages = d.get("messages", [])
-    state.files_modified = d.get("files_modified", [])
-    state.auto_resume = d.get("auto_resume", True)
-    state.overview_doc = d.get("overview_doc", "")
-    return state
-
-
-def _auto_resume_watcher():
-    """Background loop: every 30s, checks paused runs with auto_resume=True
-    and resumes any whose blocking providers should have quota again."""
-    while True:
-        time.sleep(30)
-        for orch_id, state in list(active_orchestrations.items()):
-            if state.status == "paused" and state.auto_resume:
-                still_resting = any(info["resting"] for info in provider_status().values())
-                if not still_resting:
-                    state.add_message("info", "Auto-resuming — provider quota should be available again.")
-                    thread = threading.Thread(
-                        target=run_orchestration_loop,
-                        args=(state.original_task, orch_id, state.language, state.auto_resume, state, state.complexity_setting)
-                    )
-                    thread.daemon = True
-                    thread.start()
-
-threading.Thread(target=_auto_resume_watcher, daemon=True).start()
-
-@app.route("/api/result/<orch_id>", methods=["GET"])
-def result(orch_id):
-    """Get final result"""
-    if orch_id not in active_orchestrations:
-        return jsonify({"error": "Orchestration not found"}), 404
-
-    state = active_orchestrations[orch_id]
-
-    if state.status != "success":
-        return jsonify({
-            "status": state.status,
-            "quality_score": state.quality_score,
-            "code": state.current_code
-        })
-
-    return jsonify({
-        "status": "success",
-        "quality_score": state.quality_score,
-        "code": state.current_code,
-        "iterations": state.iteration,
-        "cost": 0
-    })
-
-@app.route("/", methods=["GET"])
-def index():
-    """Serve the web UI"""
-    return serve_ui()
-
-def serve_ui():
-    """Return the Aeon web UI: dark, warm-paper themed, amber/gold accent,
-    dusty sage for success, muted rust for errors, no emoji (line icons
-    instead), and no provider names surfaced anywhere."""
-    html = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Aeon</title>
-        <link rel="preconnect" href="https://fonts.googleapis.com">
-        <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@500;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-        <style>
-            :root {
-                --bg: #211d1a;
-                --bg-soft: #262119;
-                --card: #2a241f;
-                --card-raised: #302a24;
-                --ink: #f2ead9;
-                --ink-dim: #c9beac;
-                --ink-faint: #8c8272;
-                --amber: #d9a441;
-                --amber-soft: rgba(217, 164, 65, 0.16);
-                --sage: #8fa88a;
-                --sage-soft: rgba(143, 168, 138, 0.14);
-                --rust: #b5573f;
-                --rust-soft: rgba(181, 87, 63, 0.14);
-                --hairline: rgba(242, 234, 217, 0.08);
-            }
-
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-
-            body {
-                font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-                background-color: var(--bg);
-                background-image:
-                    radial-gradient(circle at 1px 1px, rgba(242,234,217,0.035) 1px, transparent 0);
-                background-size: 3px 3px;
-                color: var(--ink);
-                min-height: 100vh;
-                padding: 28px 20px;
-            }
-
-            .container {
-                max-width: 1180px;
-                margin: 0 auto;
-            }
-
-            .header {
-                display: flex;
-                align-items: baseline;
-                justify-content: space-between;
-                flex-wrap: wrap;
-                gap: 10px;
-                padding: 8px 4px 26px;
-                border-bottom: 1px solid var(--hairline);
-                margin-bottom: 28px;
-            }
-            .header .wordmark {
-                font-family: 'Nunito', sans-serif;
-                font-weight: 800;
-                font-size: 2.4em;
-                letter-spacing: 0.01em;
-                color: var(--ink);
-            }
-            .header .wordmark span { color: var(--amber); }
-            .header .tagline {
-                font-size: 0.95em;
-                color: var(--ink-faint);
-            }
-
-            .grid {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 22px;
-                margin-bottom: 22px;
-            }
-            @media (max-width: 820px) {
-                .grid { grid-template-columns: 1fr; }
-            }
-
-            .panel {
-                background: var(--card);
-                border-radius: 14px;
-                padding: 22px;
-                box-shadow: 0 12px 30px -18px rgba(0,0,0,0.55), 0 2px 6px rgba(0,0,0,0.2);
-                display: flex;
-                flex-direction: column;
-            }
-
-            .panel-title {
-                display: flex;
-                align-items: center;
-                gap: 10px;
-                font-family: 'Nunito', sans-serif;
-                font-weight: 700;
-                font-size: 1.15em;
-                margin-bottom: 16px;
-                color: var(--ink);
-            }
-            .panel-title svg { flex-shrink: 0; color: var(--amber); }
-
-            label.field-label {
-                font-size: 0.85em;
-                font-weight: 600;
-                color: var(--ink-dim);
-                margin-bottom: 6px;
-                display: block;
-            }
-
-            select, textarea {
-                width: 100%;
-                background: var(--bg-soft);
-                border: 1px solid var(--hairline);
-                border-radius: 10px;
-                color: var(--ink);
-                font-family: 'Inter', sans-serif;
-                font-size: 0.95em;
-                padding: 12px 14px;
-            }
-            select {
-                margin-bottom: 16px;
-                appearance: none;
-            }
-            textarea {
-                flex: 1;
-                min-height: 160px;
-                resize: vertical;
-                line-height: 1.5;
-            }
-            textarea:focus, select:focus {
-                outline: none;
-                border-color: var(--amber);
-                box-shadow: 0 0 0 3px var(--amber-soft);
-            }
-
-            .toggle-row {
-                display: flex;
-                align-items: center;
-                gap: 10px;
-                margin: 16px 0 6px;
-                font-size: 0.9em;
-                color: var(--ink-dim);
-            }
-            .toggle-row input { accent-color: var(--amber); width: 16px; height: 16px; }
-
-            .button-row {
-                display: flex;
-                gap: 10px;
-                margin-top: 16px;
-                flex-wrap: wrap;
-            }
-            button {
-                border: none;
-                border-radius: 10px;
-                font-family: 'Nunito', sans-serif;
-                font-weight: 700;
-                font-size: 0.92em;
-                padding: 12px 20px;
-                cursor: pointer;
-                display: inline-flex;
-                align-items: center;
-                gap: 8px;
-                transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
-            }
-            .btn-primary {
-                background: var(--amber);
-                color: #26200f;
-                flex: 1;
-            }
-            .btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 8px 18px -8px rgba(217,164,65,0.5); }
-            .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
-            .btn-secondary {
-                background: var(--card-raised);
-                color: var(--ink-dim);
-            }
-            .btn-secondary:hover { color: var(--ink); }
-            .btn-resume {
-                background: var(--sage);
-                color: #1c2a1a;
-                display: none;
-            }
-
-            .status-banner {
-                margin-top: 16px;
-                padding: 12px 14px;
-                border-radius: 10px;
-                font-size: 0.9em;
-                font-weight: 600;
-                display: none;
-                align-items: center;
-                gap: 10px;
-            }
-            .status-banner.show { display: flex; }
-            .status-banner.running { background: var(--amber-soft); color: var(--amber); }
-            .status-banner.success { background: var(--sage-soft); color: var(--sage); }
-            .status-banner.warning { background: var(--amber-soft); color: var(--amber); }
-            .status-banner.error   { background: var(--rust-soft); color: var(--rust); }
-
-            .spinner {
-                width: 13px; height: 13px;
-                border: 2px solid currentColor;
-                border-right-color: transparent;
-                border-radius: 50%;
-                animation: spin 0.7s linear infinite;
-                flex-shrink: 0;
-            }
-            @keyframes spin { to { transform: rotate(360deg); } }
-
-            .overview-doc {
-                display: none;
-                white-space: pre-wrap;
-                background: var(--bg-soft);
-                border: 1px solid var(--hairline);
-                border-left: 3px solid var(--amber);
-                border-radius: 10px;
-                padding: 14px;
-                margin-top: 12px;
-                font-size: 0.85em;
-                color: var(--ink-dim);
-                line-height: 1.5;
-                max-height: 220px;
-                overflow-y: auto;
-            }
-
-            .log {
-                background: var(--bg-soft);
-                border: 1px solid var(--hairline);
-                border-radius: 10px;
-                padding: 14px;
-                height: 380px;
-                overflow-y: auto;
-                font-size: 0.87em;
-                line-height: 1.7;
-            }
-            .log-entry { display: flex; align-items: flex-start; gap: 8px; padding: 3px 0; }
-            .log-entry svg { flex-shrink: 0; margin-top: 3px; }
-            .log-entry.info svg { color: var(--ink-faint); }
-            .log-entry.success svg { color: var(--sage); }
-            .log-entry.warning svg { color: var(--amber); }
-            .log-entry.error svg { color: var(--rust); }
-            .log-entry.info span { color: var(--ink-dim); }
-            .log-entry.success span { color: var(--sage); }
-            .log-entry.warning span { color: var(--amber); }
-            .log-entry.error span { color: var(--rust); }
-
-            .code-output {
-                flex: 1;
-                min-height: 260px;
-                background: var(--bg-soft);
-                font-family: 'SF Mono', 'Consolas', monospace;
-                font-size: 0.85em;
-                color: var(--ink);
-                line-height: 1.6;
-            }
-
-            .stats-row {
-                display: grid;
-                grid-template-columns: repeat(3, 1fr);
-                gap: 12px;
-            }
-            .stat {
-                background: var(--card-raised);
-                border-radius: 10px;
-                padding: 16px;
-                text-align: center;
-            }
-            .stat-value {
-                font-family: 'Nunito', sans-serif;
-                font-weight: 800;
-                font-size: 1.8em;
-                color: var(--amber);
-            }
-            .stat-label {
-                font-size: 0.8em;
-                color: var(--ink-faint);
-                margin-top: 4px;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <div>
-                    <div class="wordmark">Ae<span>o</span>n</div>
-                    <div class="tagline">Describe a task. Aeon plans it, writes it, checks it, and keeps refining until it's ready.</div>
-                </div>
-            </div>
-
-            <div class="grid">
-                <div class="panel">
-                    <div class="panel-title">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-                        Your task
-                    </div>
-                    <label class="field-label" for="languageSelect">Language</label>
-                    <select id="languageSelect">
-                        <option value="python">Python</option>
-                        <option value="html">HTML / CSS / JS</option>
-                        <option value="c">C</option>
-                    </select>
-                    <label class="field-label" for="complexitySelect">Speed / complexity</label>
-                    <select id="complexitySelect">
-                        <option value="auto">Auto-detect</option>
-                        <option value="simple">Fast — simple task</option>
-                        <option value="medium">Medium</option>
-                        <option value="complex">Thorough — complex task</option>
-                    </select>
-                    <label class="field-label" for="taskInput">What should Aeon build?</label>
-                    <textarea id="taskInput" placeholder="Describe the code you want to create..."></textarea>
-                    <label class="toggle-row">
-                        <input type="checkbox" id="autoResumeToggle" checked>
-                        Resume automatically once a paused step becomes available again
-                    </label>
-                    <div class="button-row">
-                        <button class="btn-primary" id="orchestrateBtn" onclick="startOrchestration()">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>
-                            Start
-                        </button>
-                        <button class="btn-secondary" onclick="clearAll()">Clear</button>
-                        <button class="btn-resume" id="resumeBtn" onclick="resumeOrchestration()">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l14 9-14 9V3z"/></svg>
-                            Resume now
-                        </button>
-                    </div>
-                    <div id="status" class="status-banner"></div>
-                    <div id="overviewDoc" class="overview-doc"></div>
-                </div>
-
-                <div class="panel">
-                    <div class="panel-title">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
-                        Progress
-                    </div>
-                    <div class="log" id="messages"></div>
-                </div>
-            </div>
-
-            <div class="grid">
-                <div class="panel">
-                    <div class="panel-title">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg>
-                        Generated code
-                    </div>
-                    <textarea class="code-output" id="codeOutput" readonly></textarea>
-                    <div class="button-row">
-                        <button class="btn-secondary" onclick="copyCode()">
-                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                            Copy to clipboard
-                        </button>
-                    </div>
-                </div>
-
-                <div class="panel">
-                    <div class="panel-title">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9M13 17V5M8 17v-4"/></svg>
-                        Statistics
-                    </div>
-                    <div class="stats-row">
-                        <div class="stat">
-                            <div class="stat-value" id="qualityScore">—</div>
-                            <div class="stat-label">Quality score</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-value" id="iterationCount">—</div>
-                            <div class="stat-label">Iterations</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-value" id="complexityBadge">—</div>
-                            <div class="stat-label">Complexity</div>
-                        </div>
-                        <div class="stat">
-                            <div class="stat-value">Free</div>
-                            <div class="stat-label">Cost</div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <script>
-            let currentOrchId = null;
-            let pollInterval = null;
-
-            const ICONS = {
-                info: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>',
-                success: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>',
-                warning: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>',
-                error: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/></svg>'
-            };
-
-            async function startOrchestration() {
-                const task = document.getElementById("taskInput").value.trim();
-                const language = document.getElementById("languageSelect").value;
-                const complexity = document.getElementById("complexitySelect").value;
-                if (!task) {
-                    alert("Please enter a task");
-                    return;
-                }
-
-                try {
-                    const health = await fetch("/api/health").then(r => r.json());
-                    if (health.status !== "ready") {
-                        alert("System not ready: " + health.message);
-                        return;
-                    }
-                } catch (e) {
-                    alert("Cannot connect to backend");
-                    return;
-                }
-
-                document.getElementById("orchestrateBtn").disabled = true;
-                clearMessages();
-                document.getElementById("codeOutput").value = "";
-                document.getElementById("qualityScore").textContent = "—";
-                document.getElementById("iterationCount").textContent = "—";
-                document.getElementById("complexityBadge").textContent = "—";
-
-                const auto_resume = document.getElementById("autoResumeToggle").checked;
-                document.getElementById("overviewDoc").style.display = "none";
-                document.getElementById("resumeBtn").style.display = "none";
-
-                const response = await fetch("/api/orchestrate", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ task, language, complexity, auto_resume })
-                });
-
-                const data = await response.json();
-                currentOrchId = data.id;
-
-                showStatus("running", `Orchestration started (ID: ${currentOrchId})`);
-                addMessage("info", "Starting orchestration...");
-
-                pollInterval = setInterval(pollStatus, 1000);
-            }
-
-            async function pollStatus() {
-                if (!currentOrchId) return;
-
-                try {
-                    const response = await fetch(`/api/status/${currentOrchId}`);
-                    const state = await response.json();
-
-                    const messagesDiv = document.getElementById("messages");
-                    const lastCount = messagesDiv.children.length;
-
-                    if (state.messages.length > lastCount) {
-                        state.messages.slice(lastCount).forEach(msg => {
-                            addMessage(msg.level, msg.text);
-                        });
-                    }
-
-                    if (state.quality_score) {
-                        document.getElementById("qualityScore").textContent = state.quality_score + "/100";
-                    }
-                    if (state.iteration) {
-                        document.getElementById("iterationCount").textContent = state.iteration;
-                    }
-                    if (state.complexity_label) {
-                        document.getElementById("complexityBadge").textContent = state.complexity_label;
-                    }
-
-                    if (state.code) {
-                        document.getElementById("codeOutput").value = state.code;
-                    }
-
-                    if (state.status === "success") {
-                        clearInterval(pollInterval);
-                        showStatus("success", "Orchestration complete.");
-                        document.getElementById("orchestrateBtn").disabled = false;
-                    } else if (state.status === "safety_ceiling_reached") {
-                        clearInterval(pollInterval);
-                        showStatus("error", "Safety ceiling reached.");
-                        document.getElementById("orchestrateBtn").disabled = false;
-                    } else if (state.status === "paused") {
-                        clearInterval(pollInterval);
-                        const waitMsg = state.auto_resume
-                            ? "Paused — will resume automatically once available."
-                            : "Paused — waiting for your approval to continue.";
-                        showStatus("warning", waitMsg);
-                        document.getElementById("orchestrateBtn").disabled = false;
-                        if (state.overview_doc) {
-                            const docDiv = document.getElementById("overviewDoc");
-                            docDiv.textContent = state.overview_doc;
-                            docDiv.style.display = "block";
-                        }
-                        document.getElementById("resumeBtn").style.display = "inline-flex";
-                    }
-                } catch (e) {
-                    console.error("Poll error:", e);
-                }
-            }
-
-            async function resumeOrchestration() {
-                if (!currentOrchId) return;
-                document.getElementById("resumeBtn").style.display = "none";
-                await fetch(`/api/resume/${currentOrchId}`, { method: "POST" });
-                showStatus("running", "Resuming...");
-                pollInterval = setInterval(pollStatus, 1000);
-            }
-
-            function addMessage(level, text) {
-                const messagesDiv = document.getElementById("messages");
-                const entry = document.createElement("div");
-                entry.className = "log-entry " + level;
-                const icon = ICONS[level] || ICONS.info;
-                entry.innerHTML = icon + "<span></span>";
-                entry.querySelector("span").textContent = text;
-                messagesDiv.appendChild(entry);
-                messagesDiv.scrollTop = messagesDiv.scrollHeight;
-            }
-
-            function clearMessages() {
-                document.getElementById("messages").innerHTML = "";
-            }
-
-            function showStatus(type, text) {
-                const status = document.getElementById("status");
-                status.className = "status-banner show " + type;
-                if (type === "running") {
-                    status.innerHTML = '<span class="spinner"></span><span></span>';
-                    status.querySelector("span:last-child").textContent = text;
-                } else {
-                    status.innerHTML = (ICONS[type === "error" ? "error" : type === "success" ? "success" : "warning"] || "") + "<span></span>";
-                    status.querySelector("span").textContent = text;
-                }
-            }
-
-            function copyCode() {
-                const code = document.getElementById("codeOutput");
-                code.select();
-                document.execCommand("copy");
-            }
-
-            function clearAll() {
-                document.getElementById("taskInput").value = "";
-                clearMessages();
-                document.getElementById("codeOutput").value = "";
-                document.getElementById("complexityBadge").textContent = "—";
-                document.getElementById("status").classList.remove("show");
-                document.getElementById("orchestrateBtn").disabled = false;
-                document.getElementById("resumeBtn").style.display = "none";
-                document.getElementById("overviewDoc").style.display = "none";
-                if (pollInterval) clearInterval(pollInterval);
-            }
-        </script>
-    </body>
-    </html>
-    """
-    return html, 200, {"Content-Type": "text/html"}
-
-if __name__ == "__main__":
-    print("Aeon — multi-agent code orchestrator backend")
-    print("Starting Flask server on http://localhost:5000")
-    print("Make sure Ollama is running: ollama serve")
-    app.run(host="0.0.0.0", port=5000, debug=False)
