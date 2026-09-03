@@ -4,7 +4,7 @@ Web Backend for Multi-Agent Orchestrator
 Flask API that runs the orchestration and streams results
 """
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, send_from_directory
 from flask_cors import CORS
 import subprocess
 import json
@@ -18,6 +18,7 @@ from pathlib import Path
 import requests
 from typing import Optional
 
+# Configured to automatically serve index.html from your repository root
 app = Flask(__name__, static_folder=".", static_url_path="")
 CORS(app)
 
@@ -542,6 +543,10 @@ def run_orchestration_thread(orch_id: str, state: OrchestratorState):
 
 
 @app.route("/", methods=["GET"])
+def serve_index():
+    return send_from_directory(".", "index.html")
+
+
 @app.route("/api/health", methods=["GET"])
 @app.route("/health", methods=["GET"])
 def health_check():
