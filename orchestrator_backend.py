@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Web Backend for Multi-Agent Orchestrator
-Flask API that runs the orchestration and streams results
+Flask API that runs the orchestration, streams results, and serves static frontend files.
 """
 
 from flask import Flask, request, jsonify, Response, send_from_directory
@@ -18,7 +18,7 @@ from pathlib import Path
 import requests
 from typing import Optional
 
-# Configured to automatically serve index.html from your repository root
+# Setup Flask to serve static files from the root directory
 app = Flask(__name__, static_folder=".", static_url_path="")
 CORS(app)
 
@@ -97,7 +97,6 @@ def _openai_style_call(name: str, url: str, api_key: str, model: str,
     except Exception as e:
         print(f"[{name}] request failed: {e}", file=sys.stderr)
         return None
-
 
 def call_groq(prompt, max_tokens):
     return _openai_style_call("groq", "https://api.groq.com/openai/v1/chat/completions",
@@ -542,8 +541,17 @@ def run_orchestration_thread(orch_id: str, state: OrchestratorState):
         save_run_state(orch_id, state)
 
 
+# Root route explicitly serves index.html from your directory
 @app.route("/", methods=["GET"])
 def serve_index():
+    return send_from_directory(".", "index.html")
+
+
+# Fallback route to serve static assets (JS, CSS, images) directly
+@app.route("/<path:path>", methods=["GET"])
+def serve_static_file(path):
+    if os.path.exists(path):
+        return send_from_directory(".", path)
     return send_from_directory(".", "index.html")
 
 
