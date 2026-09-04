@@ -119,9 +119,12 @@ def _openai_style_call(name: str, url: str, api_key: str, model: str,
 
 
 def call_groq(prompt, max_tokens):
+    # llama-3.3-70b-versatile was deprecated by Groq (returns HTTP 404
+    # model_not_found). openai/gpt-oss-120b is their current recommended
+    # general-purpose replacement.
     return _openai_style_call("groq", "https://api.groq.com/openai/v1/chat/completions",
                                os.environ.get("GROQ_API_KEY", "").strip(),
-                               "llama-3.3-70b-versatile", prompt, max_tokens)
+                               "openai/gpt-oss-120b", prompt, max_tokens)
 
 def call_gemini(prompt, max_tokens):
     name = "gemini"
@@ -640,7 +643,15 @@ def _validate_python(file_path: str, state: OrchestratorState, results: dict):
     try:
         result = subprocess.run(
             ["python", file_path],
-            capture_output=True, text=True, timeout=15
+            capture_output=True, text=True, timeout=15,
+            # Generated code frequently calls input() (e.g. "take 2 numbers
+            # from the user"), but this process has no interactive stdin —
+            # without feeding something in, input() immediately raises
+            # EOFError and every such script fails validation regardless
+            # of correctness. 20 lines of a generic numeric-and-text value
+            # covers most simple prompts (numbers parse fine as int/float,
+            # and it's also valid as a plain string for text prompts).
+            input="1\n" * 20,
         )
         if result.returncode == 0:
             results["execution_ok"] = True
@@ -685,7 +696,10 @@ def _validate_c(file_path: str, state: OrchestratorState, results: dict):
 
     try:
         run_result = subprocess.run(
-            [binary_path], capture_output=True, text=True, timeout=15
+            [binary_path], capture_output=True, text=True, timeout=15,
+            # Same reasoning as the Python validator: no interactive stdin
+            # means scanf()/getchar() etc. would hang or fail without this.
+            input="1\n" * 20,
         )
         if run_result.returncode == 0:
             results["execution_ok"] = True
